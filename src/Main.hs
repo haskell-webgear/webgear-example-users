@@ -150,9 +150,9 @@ putUserHandler :: ( MonadReader UserStore m
                   )
                => Handler' m req User
 putUserHandler = Kleisli $ \request -> do
-  let uid  = pick @IntUserId $ from request
-      user = pick @(JSONBody User) $ from request
-      user'       = user { userId = UserId uid }
+  let uid   = pick @IntUserId $ from request
+      user  = pick @(JSONBody User) $ from request
+      user' = user { userId = UserId uid }
   store <- ask
   addUser store user'
   logActivity request "updated"
