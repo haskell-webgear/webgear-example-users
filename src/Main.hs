@@ -13,12 +13,9 @@ module Main where
 
 import Control.Applicative (Alternative (..))
 import Control.Arrow (Kleisli (..))
-import Control.Monad (MonadPlus)
-import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..))
 import Control.Monad.State.Strict (MonadState)
-import Control.Monad.Trans (lift)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.HashMap.Strict as HM
@@ -96,80 +93,69 @@ authConfig = BasicAuthConfig
 
 -- The route handlers run in the App monad
 newtype App a = App { unApp :: ReaderT UserStore Router a }
-  deriving newtype ( Functor, Applicative, Alternative, Monad, MonadPlus
-                   , MonadIO , MonadReader UserStore, MonadError RouteError, MonadState PathInfo)
+  deriving newtype ( Functor
+                   , Applicative
+                   , Alternative
+                   , Monad
+                   , MonadIO
+                   , MonadReader UserStore
+                   , MonadState PathInfo
+                   , MonadRouter
+                   )
 
-instance MonadRouter App where
-  rejectRoute = App $ lift rejectRoute
-  errorResponse = App . lift . errorResponse
-  catchErrorResponse (App (ReaderT action)) handler = App $ ReaderT $ \r ->
-    catchErrorResponse (action r) (flip runReaderT r . unApp . handler)
-
-userRoutes :: Handler' App '[] ByteString
+userRoutes :: Handler App '[] ByteString
 userRoutes = [match| /v1/users/userId:Int |]   -- non-TH version: path @"/v1/users" . pathVar @"userId" @Int
                (publicRoutes <|> protectedRoutes)
 
 -- | Routes accessible without any authentication
-publicRoutes :: HasTrait IntUserId req => Handler' App req ByteString
+publicRoutes :: HasTrait IntUserId req => Handler App req ByteString
 publicRoutes = getUser
 
 -- | Routes that require HTTP basic authentication
-protectedRoutes :: HasTrait IntUserId req => Handler' App req ByteString
+protectedRoutes :: HasTrait IntUserId req => Handler App req ByteString
 protectedRoutes = basicAuth authConfig
                   $ putUser <|> deleteUser
 
-getUser :: HasTrait IntUserId req => Handler' App req ByteString
+getUser :: HasTrait IntUserId req => Handler App req ByteString
 getUser = method @GET
           $ jsonResponseBody @User
-          $ getUserHandler
+          $ handler
+  where
+    handler :: HasTrait IntUserId req => Handler App req User
+    handler = Kleisli $ \request -> do
+      let uid = pick @IntUserId $ from request
+      store <- ask
+      user <- lookupUser store (UserId uid)
+      pure $ maybe notFound404 ok200 user
 
-putUser :: HaveTraits [Auth, IntUserId] req => Handler' App req ByteString
+putUser :: HaveTraits [Auth, IntUserId] req => Handler App req ByteString
 putUser = method @PUT
           $ requestContentTypeHeader @"application/json"
           $ jsonRequestBody @User
           $ jsonResponseBody @User
-          $ putUserHandler
+          $ handler
+  where
+    handler :: HaveTraits [Auth, IntUserId, JSONBody User] req => Handler App req User
+    handler = Kleisli $ \request -> do
+      let uid   = pick @IntUserId $ from request
+          user  = pick @(JSONBody User) $ from request
+          user' = user { userId = UserId uid }
+      store <- ask
+      addUser store user'
+      logActivity request "updated"
+      pure $ ok200 user'
 
-deleteUser :: HaveTraits [Auth, IntUserId] req => Handler' App req ByteString
-deleteUser = method @DELETE deleteUserHandler
-
-getUserHandler :: ( MonadReader UserStore m
-                  , MonadIO m
-                  , HasTrait IntUserId req
-                  )
-               => Handler' m req User
-getUserHandler = Kleisli $ \request -> do
-  let uid = pick @IntUserId $ from request
-  store <- ask
-  user <- lookupUser store (UserId uid)
-  pure $ maybe notFound404 ok200 user
-
-putUserHandler :: ( MonadReader UserStore m
-                  , MonadIO m
-                  , HaveTraits [Auth, IntUserId, JSONBody User]  req
-                  )
-               => Handler' m req User
-putUserHandler = Kleisli $ \request -> do
-  let uid   = pick @IntUserId $ from request
-      user  = pick @(JSONBody User) $ from request
-      user' = user { userId = UserId uid }
-  store <- ask
-  addUser store user'
-  logActivity request "updated"
-  pure $ ok200 user'
-
-deleteUserHandler :: ( MonadReader UserStore m
-                     , MonadIO m
-                     , HaveTraits [Auth, IntUserId] req
-                     )
-                  => Handler' m req ByteString
-deleteUserHandler = Kleisli $ \request -> do
-  let uid = pick @IntUserId $ from request
-  store <- ask
-  found <- removeUser store (UserId uid)
-  if found
-    then logActivity request "deleted" >> pure noContent204
-    else pure notFound404
+deleteUser :: HaveTraits [Auth, IntUserId] req => Handler App req ByteString
+deleteUser = method @DELETE handler
+  where
+    handler :: HaveTraits [Auth, IntUserId] req => Handler App req ByteString
+    handler = Kleisli $ \request -> do
+      let uid = pick @IntUserId $ from request
+      store <- ask
+      found <- removeUser store (UserId uid)
+      if found
+        then logActivity request "deleted" >> pure noContent204
+        else pure notFound404
 
 logActivity :: (MonadIO m, HasTrait Auth req) => Linked req Request -> String -> m ()
 logActivity request msg = do
