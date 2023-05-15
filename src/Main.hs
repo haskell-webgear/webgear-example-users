@@ -126,10 +126,14 @@ protectedRoutes ::
       '[RequiredHeader "Content-Type" Text, JSONBody User, Body Text]
   ) =>
   RequestHandler h req
-protectedRoutes = basicAuth authConfig forbidden $ putUser <+> deleteUser
+protectedRoutes = basicAuth authConfig authError $ putUser <+> deleteUser
   where
-    forbidden :: h a Response
-    forbidden = proc _ -> unlinkA . respondA @Text HTTP.forbidden403 "text/plain" -< "Unauthorized"
+    authError :: h (Linked req Request, BasicAuthError ()) Response
+    authError = proc (_request, err) -> case err of
+      BasicAuthAttributeError () ->
+        unlinkA . respondA @Text HTTP.forbidden403 "text/plain" -< "Forbidden"
+      _ ->
+        unlinkA . respondA @Text HTTP.unauthorized401 "text/plain" -< "Unauthorized"
 
 getUser ::
   forall h req.
